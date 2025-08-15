@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lamumu Cow – Shooting Game</title>
+  <style>
+    :root{
+      --bg:#0b0c10; --ink:#f1f1f1; --muted:#a7a7a7; --accent:#69e4a6; --danger:#ff6b6b;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0; font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial; background:radial-gradient(1200px 800px at 70% -10%, #20222a 0%, var(--bg) 45%); color:var(--ink);}
+    .hud{ position:fixed; inset:0; pointer-events:none }
+    .top{ display:flex; gap:10px; position:absolute; left:16px; top:12px; }
+    .pill{ pointer-events:auto; background:rgba(20,22,28,.7); border:1px solid #2b2f39; padding:8px 12px; border-radius:12px; backdrop-filter: blur(4px); }
+    .pill b{font-size:18px}
+    .controls{ position:absolute; right:16px; top:12px; display:flex; gap:8px }
+    button{ pointer-events:auto; background:var(--accent); color:#072019; border:none; padding:10px 14px; border-radius:12px; font-weight:700; cursor:pointer; }
+    button.ghost{ background:transparent; color:var(--ink); border:1px solid #2a2f38 }
+    .center{ position:absolute; inset:0; display:grid; place-items:center; }
+    .card{ background:linear-gradient(180deg,#191b22,#121318); border:1px solid #2a2f38; padding:18px 20px; border-radius:16px; width:min(520px,92vw); text-align:center; box-shadow:0 20px 40px rgba(0,0,0,.35) }
+    h1{ margin:8px 0 6px; font-size:clamp(24px,4.4vw,30px) }
+    p{ color:var(--muted); margin:6px 0 14px }
+    .kbd{ font-family:ui-monospace, SFMono-Regular, Menlo, monospace; background:#0f1116; border:1px solid #272c36; padding:2px 6px; border-radius:6px }
+    .toast{ position:fixed; left:50%; top:14px; transform:translateX(-50%); background:#0f1115; border:1px solid #2a2f38; border-radius:12px; padding:8px 12px; opacity:0; transition:opacity .25s ease; }
+    .toast.show{ opacity:1 }
+    canvas{ display:block; width:100vw; height:100vh; }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="1280" height="720" aria-label="Lamumu Cow Shooting Game" role="img"></canvas>
+  <div class="hud" aria-live="polite">
+    <div class="top">
+      <div class="pill">Score: <b id="score">0</b></div>
+      <div class="pill">Level: <b id="level">1</b></div>
+      <div class="pill">Lives: <b id="lives">3</b></div>
+      <div class="pill">Accuracy: <b id="acc">0%</b></div>
+      <div class="pill">Best: <b id="best">0</b></div>
+    </div>
+    <div class="controls">
+      <button id="startBtn">▶ Start</button>
+      <button class="ghost" id="restartBtn">↻ Restart</button>
+      <button class="ghost" id="pauseBtn">⏸️ Pause</button>
+    </div>
+    <div class="center" id="menu">
+      <div class="card">
+        <h1>🐄 Lamumu Cow – Shooting Game</h1>
+        <p>Click / tap to shoot the black‑and‑white cows before they escape. Miss three cows and the round ends. Headshots and the rare <b>Lamumu</b> cow give bonus points!</p>
+        <p>Controls: <span class="kbd">Mouse</span> to aim • <span class="kbd">Click / Tap</span> to shoot • <span class="kbd">P</span> Pause • <span class="kbd">R</span> Restart</p>
+        <button id="menuStart">Start Game</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast" class="toast">Nice Shot! +1</div>
+
+  <script>
+  // ===== Utilities =====
+  const TAU = Math.PI*2;
+  const lerp = (a,b,t)=> a+(b-a)*t;
+  const clamp=(n,min,max)=> Math.max(min, Math.min(max,n));
+  const rand=(a,b)=> Math.random()*(b-a)+a;
+
+  // ===== Canvas & DPI scaling =====
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  function resize(){
+    const w = window.innerWidth, h = window.innerHeight;
+    canvas.style.width = w+'px'; canvas.style.height = h+'px';
+    canvas.width = Math.floor(w*dpr); canvas.height = Math.floor(h*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0); // draw in CSS pixels for simplicity
+  }
+  addEventListener('resize', resize, {passive:true}); resize();
+
+  // ===== HUD =====
+  const scoreEl = document.getElementById('score');
+  const levelEl = document.getElementById('level');
+  const livesEl = document.getElementById('lives');
+  const accEl   = document.getElementById('acc');
+  const bestEl  = document.getElementById('best');
+  bestEl.textContent = localStorage.getItem('lamumuBest')||'0';
+  const toastEl = document.getElementById('toast');
+  function toast(msg){ toastEl.textContent = msg; toastEl.classList.add('show'); setTimeout(()=> toastEl.classList.remove('show'), 650); }
+
+  // ===== Offscreen cow sprite (performance) =====
+  const cowCanvas = document.createElement('canvas');
+  const cowCtx = cowCanvas.getContext('2d');
+  function makeCowSprite(){
+    const s=96; cowCanvas.width=s; cowCanvas.height=s;
+    cowCtx.clearRect(0,0,s,s);
+    // body
+    cowCtx.fillStyle='#fff'; cowCtx.beginPath(); cowCtx.ellipse(48,50,36,24,0,0,TAU); cowCtx.fill();
+    // head
+    cowCtx.beginPath(); cowCtx.ellipse(78,45,12,10,0,0,TAU); cowCtx.fill();
+    // ears
+    cowCtx.fillStyle='#111'; cowCtx.beginPath(); cowCtx.ellipse(68,35,5,3,0,0,TAU); cowCtx.ellipse(88,35,5,3,0,0,TAU); cowCtx.fill();
+    // legs
+    cowCtx.fillStyle='#222'; for(let i=0;i<4;i++){ cowCtx.fillRect(22+i*14,68,6,14); }
+    // nose
+    cowCtx.fillRect(72,46,12,7);
+    // random spots
+    cowCtx.fillStyle='#000'; for(let i=0;i<4;i++){ cowCtx.globalAlpha=0.8-rand(0,0.2); cowCtx.beginPath(); cowCtx.ellipse(rand(24,64), rand(38,60), rand(5,10), rand(4,8), 0,0,TAU); cowCtx.fill(); }
+    cowCtx.globalAlpha=1;
+  }
+  makeCowSprite();
+
+  // ===== Game State =====
+  let playing=false, paused=false;
+  let score=0, level=1, lives=3, shots=0, hits=0;
+  let spawnTimer=0, spawnRate=1200; // ms
+  const cows=[]; // object pool
+  const particles=[];
+  const MAX_PARTICLES=200;
+
+  function reset(){
+    playing=false; paused=false; score=0; level=1; lives=3; shots=0; hits=0; spawnRate=1200; cows.length=0; particles.length=0; updateHud();
+  }
+  reset();
+
+  // ===== Entities =====
+  function spawnCow(){
+    const side = Math.random()<0.5 ? 'left':'right';
+    const y = rand(80, window.innerHeight-100);
+    const speed = rand(120, 180) + level*6; // px/s
+    const scale = rand(.85,1.15);
+    const lamumu = Math.random()< Math.min(0.06, 0.02 + level*0.004); // rare bonus cow
+    const hp = lamumu?2:1;
+    const value = lamumu?3:1;
+
+    const cow = {
+      x: side==='left'? -120 : window.innerWidth+120,
+      y,
+      vx: (side==='left'?1:-1) * speed,
+      radius: 36*scale,
+      scale, lamumu, hp, value,
+      dead:false,
+    };
+    cows.push(cow);
+  }
+
+  function hitCow(cow){
+    cow.hp--; hits++; score += cow.value; toast(cow.lamumu? 'LAMUMU! +3':'Nice! +1');
+    for(let i=0;i<12;i++) spawnParticle(cow.x, cow.y);
+    if(cow.hp<=0){ cow.dead=true; }
+    level = 1 + Math.floor(score/10);
+    spawnRate = clamp(1000 - (level-1)*40, 450, 1000);
+    updateHud();
+  }
+
+  function spawnParticle(x,y){
+    if(particles.length>MAX_PARTICLES) particles.shift();
+    particles.push({x,y, vx:rand(-120,120), vy:rand(-220,-60), g:560, life:rand(.3,.7)});
+  }
+
+  // ===== Input =====
+  let mx=0, my=0, isDown=false;
+  addEventListener('pointermove', e=>{ mx=e.clientX; my=e.clientY; });
+  addEventListener('pointerdown', e=>{ if(!playing||paused) return; isDown=true; shoot(e.clientX, e.clientY); });
+  addEventListener('pointerup', ()=>{ isDown=false; });
+
+  function shoot(x,y){
+    shots++;
+    // find nearest cow hit first (top-most)
+    for(let i=cows.length-1;i>=0;i--){
+      const c=cows[i];
+      const dx=x-c.x, dy=y-c.y; if(dx*dx+dy*dy <= (c.radius*1.05)**2){ hitCow(c); break; }
+    }
+    updateHud();
+  }
+
+  // ===== Loop =====
+  let last=performance.now();
+  function loop(t){
+    requestAnimationFrame(loop);
+    const dt = (t-last)/1000; last=t; if(!playing||paused) { draw(dt,true); return; }
+
+    // spawn logic
+    spawnTimer += dt*1000;
+    if(spawnTimer>=spawnRate){ spawnTimer=0; spawnCow(); }
+
+    // update cows
+    for(let i=cows.length-1;i>=0;i--){
+      const c=cows[i]; c.x += c.vx*dt; // move
+      if(c.dead){ cows.splice(i,1); continue; }
+      if((c.vx>0 && c.x>window.innerWidth+140) || (c.vx<0 && c.x<-140)){
+        cows.splice(i,1); lives--; if(lives<=0){ gameOver(); } updateHud();
+      }
+    }
+
+    // particles
+    for(let i=particles.length-1;i>=0;i--){
+      const p=particles[i]; p.vy += p.g*dt; p.x += p.vx*dt; p.y += p.vy*dt; p.life -= dt; if(p.life<=0) particles.splice(i,1);
+    }
+
+    draw(dt,false);
+  }
+  requestAnimationFrame(loop);
+
+  // ===== Draw =====
+  function draw(dt, dim){
+    const w=window.innerWidth, h=window.innerHeight;
+    ctx.clearRect(0,0,w,h);
+
+    // background horizon
+    ctx.fillStyle = dim? '#0c0e12' : '#0d0f14';
+    ctx.fillRect(0,0,w,h);
+    ctx.fillStyle = '#0f1219'; ctx.fillRect(0,h-140,w,160);
+
+    // cows
+    cows.forEach(c=>{
+      const s=c.scale*(c.lamumu?1.15:1);
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      if(c.vx<0) { ctx.scale(-s, s); ctx.translate(-48, -48); } else { ctx.scale(s, s); ctx.translate(-48, -48); }
+      // tint if lamumu (slightly gray body)
+      ctx.globalAlpha=1; ctx.drawImage(cowCanvas,0,0);
+      if(c.lamumu){ ctx.globalCompositeOperation='source-atop'; ctx.fillStyle='rgba(170,170,170,0.35)'; ctx.fillRect(0,0,96,96); ctx.globalCompositeOperation='source-over'; }
+      ctx.restore();
+
+      // debug circle (hit area) — turned off by default
+      // ctx.beginPath(); ctx.arc(c.x,c.y,c.radius,0,TAU); ctx.strokeStyle='rgba(255,255,255,.1)'; ctx.stroke();
+    });
+
+    // particles
+    ctx.fillStyle = '#eaeaea';
+    particles.forEach(p=>{ ctx.globalAlpha = clamp(p.life,0,1); ctx.beginPath(); ctx.arc(p.x,p.y,2.2,0,TAU); ctx.fill(); });
+    ctx.globalAlpha=1;
+
+    // crosshair
+    ctx.beginPath(); ctx.arc(mx,my,10,0,TAU); ctx.strokeStyle = 'rgba(240,240,240,.5)'; ctx.lineWidth=2; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(mx-14,my); ctx.lineTo(mx-4,my); ctx.moveTo(mx+4,my); ctx.lineTo(mx+14,my);
+    ctx.moveTo(mx,my-14); ctx.lineTo(mx,my-4); ctx.moveTo(mx,my+4); ctx.lineTo(mx,my+14); ctx.stroke();
+  }
+
+  // ===== HUD helpers =====
+  function updateHud(){
+    scoreEl.textContent = score;
+    levelEl.textContent = level;
+    livesEl.textContent = lives;
+    const acc = shots? Math.round((hits/shots)*100):0; accEl.textContent = acc+"%";
+  }
+
+  function gameOver(){
+    playing=false; toast('Game Over! Final: '+score);
+    const best = Math.max(Number(bestEl.textContent||0), score); bestEl.textContent=best; localStorage.setItem('lamumuBest', String(best));
+    document.getElementById('menu').style.display='grid';
+  }
+
+  // ===== Controls =====
+  const startBtn=document.getElementById('startBtn');
+  const restartBtn=document.getElementById('restartBtn');
+  const pauseBtn=document.getElementById('pauseBtn');
+  const menu=document.getElementById('menu');
+  const menuStart=document.getElementById('menuStart');
+
+  function start(){ if(playing) return; playing=true; paused=false; document.getElementById('menu').style.display='none'; score=0; level=1; lives=3; shots=0; hits=0; cows.length=0; particles.length=0; spawnTimer=0; updateHud(); }
+  function restart(){ playing=false; paused=false; document.getElementById('menu').style.display='grid'; reset(); }
+  function pause(){ if(!playing) return; paused=!paused; toast(paused? 'Paused':'Resumed'); }
+
+  startBtn.addEventListener('click', start);
+  restartBtn.addEventListener('click', restart);
+  pauseBtn.addEventListener('click', pause);
+  menuStart.addEventListener('click', start);
+
+  addEventListener('keydown', (e)=>{
+    if(e.key==='p' || e.key==='P') pause();
+    if(e.key==='r' || e.key==='R') restart();
+    if(e.code==='Space'){ e.preventDefault(); if(!playing) start(); }
+  });
+
+  </script>
+</body>
+</html>
